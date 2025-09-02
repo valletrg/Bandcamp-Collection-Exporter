@@ -17,79 +17,94 @@ COOKIES = [
 #see instructions below on how to get these 
 GITHUB_TOKEN = "YOUR_GITHUB_TOKEN"
 GIST_ID = None #YOUR GIST ID if you made one already otherwise leave as None and the script will create a new gist for you (i think)
-# =========================================
+GIST_FILENAME = "bandcamp_collection.json"
 
-def get_full_page_html(username, cookies):
+HEADLESS = False        # set to True if you don't need to see the browser (currently not working)
+SCROLL_PAUSE_MS = 600  
+MAX_STAGNANT_CYCLES = 2 
+MAX_LOOPS = 50 
+
+def get_collection_html(username, cookies):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         context = browser.new_context()
+        context.add_cookies(cookies)
         page = context.new_page()
-
-        page.context.add_cookies(cookies)
-
         page.goto(f"https://bandcamp.com/{username}")
+        page.wait_for_load_state("networkidle")
 
-        page.wait_for_selector(".collection-item-gallery-container", timeout=10000)
+        try:
+            btn = page.query_selector("text=Accept all")
+            if btn:
+                print("Clicking 'Accept all' on cookie banner...")
+                btn.click()
+                page.wait_for_timeout(1000)
+        except:
+            print("No cookie banner found or already accepted.")
 
-        while True:
-            show_more_btns = page.query_selector_all("div.expand-container.show-button button.show-more")
-            if not show_more_btns:
-                break
-            for btn in show_more_btns:
-                try:
-                    btn.scroll_into_view_if_needed()
-                    btn.click()
-                    time.sleep(1)  # wait for new items to load
-                except:
-                    pass
-            # scroll to bottom to trigger lazy loading
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(1)
+        try:
+            show_more_btn = page.query_selector("button.show-more")
+            if show_more_btn:
+                print("Clicking 'view all' to load all albums...")
+                show_more_btn.click()
+                page.wait_for_timeout(2000)  
+        except:
+            print("No 'view all' button found.")
 
         html = page.content()
         browser.close()
-        print("Browser closed")  # visual confirmation
+        print("Browser closed.")
         return html
 
 def scrape_collection(username, cookies):
-    html = get_full_page_html(username, cookies)
+    html = get_collection_html(username, cookies)
     soup = BeautifulSoup(html, "html.parser")
-    containers = soup.select(".collection-item-gallery-container")
+    collection = []
 
-    albums = []
-    for idx, c in enumerate(containers, 1):
-        title_el = c.select_one(".collection-item-title")
-        link_el = c.select_one(".collection-title-details a.item-link")
-        img_el = c.select_one(".track_play_auxiliary img.collection-item-art")
-        if title_el and link_el and img_el:
-            albums.append({
-                "title": title_el.get_text(strip=True),
-                "link": link_el.get("href"),
-                "artwork": img_el.get("src")
-            })
-        print(f"Processed album {idx}/{len(containers)}")  # progress
+    for item in soup.select("div.collection-item-gallery-container"):
+        link_tag = item.select_one("a.item-link")
+        if not link_tag:
+            continue
+        link = link_tag.get("href", "").strip()
+        title_tag = link_tag.select_one("div.collection-item-title")
+        if title_tag:
+            title = title_tag.get_text(strip=True).replace("(gift given)", "").strip()
+        else:
+            title = ""
 
-    return albums
+        art_tag = item.select_one("a.track_play_auxiliary img.collection-item-art")
+        artwork = art_tag["src"] if art_tag else ""
 
-def upload_to_gist(data, token, gist_id):
+        collection.append({
+            "title": title,
+            "link": link,
+            "artwork": artwork
+        })
+        print(f"Scraped: {title}")
+
+    return collection
+
+def upload_to_gist(collection, token, gist_id, filename):
     headers = {"Authorization": f"token {token}"}
-    payload = {
-        "files": {"bandcamp_collection.json": {"content": json.dumps(data, indent=2)}},
-        "description": "Bandcamp collection",
-        "public": True
+    data = {
+        "files": {
+            filename: {"content": json.dumps(collection, indent=4)}
+        }
     }
     url = f"https://api.github.com/gists/{gist_id}"
-    r = requests.patch(url, headers=headers, json=payload)
-    r.raise_for_status()
-    return r.json()
+    response = requests.patch(url, headers=headers, json=data)
+    response.raise_for_status()
+    print(f"Gist updated: {response.json()['html_url']}")
+    return response.json()['html_url']
 
 if __name__ == "__main__":
+    print("Scraping Bandcamp collection...")
     collection = scrape_collection(USERNAME, COOKIES)
-    print(f"Scraped {len(collection)} albums.")
-    gist_data = upload_to_gist(collection, GITHUB_TOKEN, GIST_ID)
-    print("Gist updated")
-    print(f"View your Gist at: {gist_data['html_url']}")
-
+    print(f"Total albums scraped: {len(collection)}")
+    print("Uploading collection to GitHub Gist...")
+    gist_url = upload_to_gist(collection, GITHUB_TOKEN, GIST_ID, GIST_FILENAME)
+    print(f"Done! Gist URL: {gist_url}")
+    input("Press Enter to exit...")
 
 
 
@@ -99,3 +114,4 @@ if __name__ == "__main__":
 #a more proper way of storing github token would be using environment variables, change "GITHUB_TOKEN = "TOKEN_HERE"" to "GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")" and 
 # set the environment variable accordingly through powershell with setx GITHUB_TOKEN "your_actual_token_here" so your computer always sees "GITHUB_TOKEN" as your token
 #i didnt implement this because im lazy 
+
